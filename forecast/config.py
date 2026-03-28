@@ -1,0 +1,98 @@
+"""
+Configuration for CLO cashflow forecast parameters.
+
+All tunable business-logic constants are defined here so they can be
+adjusted without editing the core modules.  Import this module and
+override values before running the workflow, or edit this file directly.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class CallAssumptions:
+    """Parameters governing optional-redemption (call) logic."""
+
+    # Basis points of friction cost assumed for refinancing.
+    refi_costs_bps: float = 10
+
+    # Basis-point premium added to the strike for middle-market CLOs
+    # (middle-market AAA spreads are wider than BSL).
+    middle_market_bsl_basis_bps: float = 50
+
+    # LIBOR-to-SOFR basis adjustment in bps (applied when the tranche
+    # resets against 3-month LIBOR rather than SOFR).
+    libor_sofr_basis_bps: float = 26.161
+
+    # Reset index identifier that triggers the LIBOR-SOFR adjustment.
+    libor_reset_index: str = "US0003M"
+
+    # Bloomberg collateral type string that identifies middle-market CLOs.
+    middle_market_collat_type: str = "CF-CLO-MML"
+
+
+@dataclass
+class DefaultAssumptions:
+    """Default credit and prepayment assumptions written to Intex uploads."""
+
+    # Constant default rate (CDR), in percent.
+    default_rate: float = 5
+
+    # Default rate units.
+    default_units: str = "CDR"
+
+    # Loss severity, in percent.
+    severity_pct: float = 50
+
+    # Severity units.
+    severity_units: str = "Percent"
+
+    # Recovery lag in months.
+    recovery_lag_months: int = 12
+
+    # Default prepayment speed (CPR) used when not overridden by scenario.
+    default_prepay_speed: int = 15
+
+
+@dataclass
+class FactorCallAssumptions:
+    """Parameters for factor-based call date extraction."""
+
+    # Deal factor threshold below which a deal is considered called.
+    # When deal_balance / orig_deal_balance < this value, the deal is called.
+    factor_threshold: float = 0.35
+
+
+@dataclass
+class ReinvestmentDefaults:
+    """Default reinvestment model parameters (mirrors the Reinvestment Models sheet)."""
+
+    model_name: str = "#DefaultReinvestAsset"
+    reinvest_type: str = "Float"
+    percent: float = 100
+    index: str = "SOFR (3mo)"
+    coupon_spread: str = "WAVG"
+    maturity_months: int = 60
+    price: float = 99.5
+    life_floor: float = 0
+    asset_type: str = "Loan"
+    asset_subtype: str = "TL"
+    amortization: str = "Bullet"
+    daycount: str = "Actual360"
+    frequency: str = "Quarterly"
+
+
+@dataclass
+class ForecastConfig:
+    """Top-level configuration combining all assumption sets."""
+
+    call: CallAssumptions = field(default_factory=CallAssumptions)
+    defaults: DefaultAssumptions = field(default_factory=DefaultAssumptions)
+    factor_call: FactorCallAssumptions = field(default_factory=FactorCallAssumptions)
+    reinvestment: ReinvestmentDefaults = field(default_factory=ReinvestmentDefaults)
+
+
+# Module-level default instance.  Import and modify this, or create your own.
+CONFIG = ForecastConfig()

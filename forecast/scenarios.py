@@ -16,6 +16,7 @@ from typing import Optional
 import openpyxl
 import pandas as pd
 
+from forecast.config import CONFIG
 from forecast.factors import ForecastedFactors
 from forecast.models import Scenario, Tranche
 
@@ -110,17 +111,14 @@ def optional_redemption(
     Returns:
         True if the deal is expected to be called (refinanced).
     """
-    refi_costs = 10  # Assume 10 bps of refi friction
-    mm_bsl_basis = 50  # Middle market AAA spreads 50 bps wide of BSL
-
-    strike = initial_aaa_margin + aaa_shock + refi_costs
+    strike = initial_aaa_margin + aaa_shock + CONFIG.call.refi_costs_bps
 
     if middle_market:
-        strike += mm_bsl_basis
+        strike += CONFIG.call.middle_market_bsl_basis_bps
 
-    # Adjust for LIBOR-SOFR basis (3M LIBOR adjustment = 0.26161% = 26.161 bps).
-    if reset_index == "US0003M":
-        strike -= 26.161
+    # Adjust for LIBOR-SOFR basis.
+    if reset_index == CONFIG.call.libor_reset_index:
+        strike -= CONFIG.call.libor_sofr_basis_bps
 
     return deal_aaa_margin > strike
 
@@ -211,13 +209,13 @@ def _build_collat_row(s: Scenario, t: Tranche, settle_str: str) -> dict:
         "Given Type": "PRICE100",
         "Given Amount": 100,
         "Enable Reinvestment Overrides": 1,
-        "Reinvestment Profile": "#DefaultReinvestAsset",
+        "Reinvestment Profile": CONFIG.reinvestment.model_name,
         "Run Calls": 1,
-        "Default Units": "CDR",
-        "Default": 5,
-        "Severity Units": "Percent",
-        "Severity": 50,
-        "Recovery Lag": 12,
+        "Default Units": CONFIG.defaults.default_units,
+        "Default": CONFIG.defaults.default_rate,
+        "Severity Units": CONFIG.defaults.severity_units,
+        "Severity": CONFIG.defaults.severity_pct,
+        "Recovery Lag": CONFIG.defaults.recovery_lag_months,
         "Prepay Units": "CPR",
     }
 
@@ -268,13 +266,13 @@ def _build_tranche_row(
         "Given Type": "PRICE100",
         "Given Amount": t.price,
         "Enable Reinvestment Overrides": 1,
-        "Reinvestment Profile": "#DefaultReinvestAsset",
+        "Reinvestment Profile": CONFIG.reinvestment.model_name,
         "Run Calls": 1,
-        "Default Units": "CDR",
-        "Default": 5,
-        "Severity Units": "Percent",
-        "Severity": 50,
-        "Recovery Lag": 12,
+        "Default Units": CONFIG.defaults.default_units,
+        "Default": CONFIG.defaults.default_rate,
+        "Severity Units": CONFIG.defaults.severity_units,
+        "Severity": CONFIG.defaults.severity_pct,
+        "Recovery Lag": CONFIG.defaults.recovery_lag_months,
         "Prepay Units": "CPR",
     }
 

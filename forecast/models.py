@@ -68,7 +68,7 @@ class Scenario:
     settle_date: date
     initial_aaa_margin: float  # in bps (e.g. 115)
     aaa_margin_shock: float  # in bps (e.g. -75)
-    prepay_speed: int = 15  # CPR
+    prepay_speed: int = 15  # CPR — overridden at runtime from config or scenario setup
     horizon_given_type: str = "DISC_MARGIN"
 
 

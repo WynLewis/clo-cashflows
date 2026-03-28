@@ -15,6 +15,7 @@ from typing import Optional
 
 import openpyxl
 
+from forecast.config import CONFIG
 from forecast.models import Tranche
 
 
@@ -54,20 +55,23 @@ class ForecastedFactors:
         self,
         cashflows_path: str | Path,
         tranches: list[Tranche],
-        factor_threshold: float = 0.35,
+        factor_threshold: float | None = None,
     ) -> None:
         """Extract factor call dates from a preliminary Intex Cashflows Excel export.
 
         For each COLLAT worksheet, finds the first period where the deal balance
-        drops below `factor_threshold` of the original deal balance.
+        drops below ``factor_threshold`` of the original deal balance.
 
         Mirrors VBA method: forecasted_factors.ImportFactorCallDates()
 
         Args:
             cashflows_path: Path to the Intex Cashflows Excel export.
             tranches: List of Tranche objects (used for original deal balances).
-            factor_threshold: Factor below which a deal is considered called (default 0.35).
+            factor_threshold: Factor below which a deal is considered called.
+                              Defaults to CONFIG.factor_call.factor_threshold.
         """
+        if factor_threshold is None:
+            factor_threshold = CONFIG.factor_call.factor_threshold
         self.clear()
 
         # Build lookup of original deal balances from tranches.

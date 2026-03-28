@@ -16,6 +16,7 @@ from typing import Optional
 
 import pandas as pd
 
+from forecast.config import CONFIG
 from forecast.models import Tranche
 from forecast.preprice import PrePriceDeals
 
@@ -139,51 +140,58 @@ def load_holdings_from_forecast_workbook(
 def clean_holdings(holdings_df: pd.DataFrame) -> pd.DataFrame:
     """Clean holdings data for Intex runs.
 
-    1. Fills in missing BBG date columns from Intex date columns when available.
-       - BBG_NC_END falls back to Non-Call End
-       - BBG_REINVEST_END falls back to Reinvest End
-    2. Drops any CUSIP that still has NA in any required Intex or BBG column.
+    1. Cross-fills missing date columns between BBG and Intex sources:
+       - BBG_NC_END <-> Non-Call End (whichever has a value fills the other)
+       - BBG_REINVEST_END <-> Reinvest End
+    2. Drops any CUSIP that still has NA in any required column.
+       For dates, a CUSIP is only dropped if BOTH sources are missing
+       (i.e. as long as at least one of BBG or Intex has the date, it's kept).
 
     Returns a cleaned copy of the DataFrame.
     """
     df = holdings_df.copy()
     initial_cusips = df["CUSIP"].nunique()
 
-    # --- Fallback: fill missing BBG dates from Intex dates ---
-    if "BBG_NC_END" in df.columns and "Non-Call End" in df.columns:
-        filled = df["BBG_NC_END"].isna() & df["Non-Call End"].notna()
-        if filled.any():
-            df.loc[filled, "BBG_NC_END"] = df.loc[filled, "Non-Call End"]
-            print(f"  Filled {filled.sum()} missing BBG_NC_END values from Non-Call End.")
-
-    if "BBG_REINVEST_END" in df.columns and "Reinvest End" in df.columns:
-        filled = df["BBG_REINVEST_END"].isna() & df["Reinvest End"].notna()
-        if filled.any():
-            df.loc[filled, "BBG_REINVEST_END"] = df.loc[filled, "Reinvest End"]
-            print(f"  Filled {filled.sum()} missing BBG_REINVEST_END values from Reinvest End.")
-
-    # --- Drop CUSIPs with NA in any required Intex/BBG column ---
-    required_cols = [
-        "Intex Name", "Intex Deal Name", "AAA Margin",
-        "Orig Deal Balance", "BBG_NC_END", "BBG_REINVEST_END",
-        "RESET_IDX", "COLLAT_TYP",
+    # --- Cross-fill dates between BBG and Intex sources ---
+    date_pairs = [
+        ("BBG_NC_END", "Non-Call End"),
+        ("BBG_REINVEST_END", "Reinvest End"),
     ]
-    present_cols = [c for c in required_cols if c in df.columns]
+    for bbg_col, intex_col in date_pairs:
+        if bbg_col in df.columns and intex_col in df.columns:
+            # Fill BBG from Intex where BBG is missing.
+            mask = df[bbg_col].isna() & df[intex_col].notna()
+            if mask.any():
+                df.loc[mask, bbg_col] = df.loc[mask, intex_col]
+                print(f"  Filled {mask.sum()} missing {bbg_col} values from {intex_col}.")
+            # Fill Intex from BBG where Intex is missing.
+            mask = df[intex_col].isna() & df[bbg_col].notna()
+            if mask.any():
+                df.loc[mask, intex_col] = df.loc[mask, bbg_col]
+                print(f"  Filled {mask.sum()} missing {intex_col} values from {bbg_col}.")
 
-    if present_cols:
-        # Find CUSIPs where ANY position has NA in a required column.
-        na_mask = df[present_cols].isna().any(axis=1)
+    # --- Drop CUSIPs with NA in any required column ---
+    # Non-date columns: always required.
+    required_cols = ["Intex Name", "Intex Deal Name", "AAA Margin",
+                     "Orig Deal Balance", "RESET_IDX", "COLLAT_TYP"]
+    # Date columns: only required if BOTH BBG and Intex are missing
+    # (after cross-fill above, if one had a value both now do).
+    date_cols = ["BBG_NC_END", "BBG_REINVEST_END"]
+
+    check_cols = [c for c in required_cols + date_cols if c in df.columns]
+
+    if check_cols:
+        na_mask = df[check_cols].isna().any(axis=1)
         bad_cusips = df.loc[na_mask, "CUSIP"].unique()
 
         if len(bad_cusips) > 0:
             df = df[~df["CUSIP"].isin(bad_cusips)].copy()
             final_cusips = df["CUSIP"].nunique()
-            print(f"  Dropped {len(bad_cusips)} CUSIPs with missing Intex/BBG data "
+            print(f"  Dropped {len(bad_cusips)} CUSIPs with missing data "
                   f"({initial_cusips} -> {final_cusips} unique CUSIPs).")
             for cusip in sorted(bad_cusips)[:10]:
-                # Show which columns were missing for debugging.
                 cusip_rows = holdings_df[holdings_df["CUSIP"] == cusip]
-                missing = [c for c in present_cols if cusip_rows[c].isna().any()]
+                missing = [c for c in check_cols if cusip_rows[c].isna().any()]
                 print(f"    {cusip}: missing {missing}")
             if len(bad_cusips) > 10:
                 print(f"    ... and {len(bad_cusips) - 10} more.")
@@ -229,7 +237,7 @@ def export_tranches(
         t.orig_deal_balance = float(row.get("Orig Deal Balance", 0) or 0)
         t.reset_index = str(row.get("RESET_IDX", "") or "")
         t.floater = str(row.get("Floater", "")).upper() == "Y"
-        t.middle_market = str(row.get("COLLAT_TYP", "")).upper() == "CF-CLO-MML"
+        t.middle_market = str(row.get("COLLAT_TYP", "")).upper() == CONFIG.call.middle_market_collat_type
 
         # Check pre-price deals for Intex info.
         if preprice_deals.get_identifier(cusip) != "N/A":
