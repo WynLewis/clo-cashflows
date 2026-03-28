@@ -36,17 +36,14 @@ def _to_date_or_none(val) -> Optional[date]:
 
 def import_holdings(
     data_packet_path: str | Path,
-    fhlb_only: bool = False,
 ) -> pd.DataFrame:
     """Import CLO holdings from a Structured Products Data Packet report.
 
     This replaces the VBA ImportHoldings() method. It reads the Data Packet
-    workbook and filters for CLO positions, optionally restricting to FHLB
-    (PAM Portfolio 13091).
+    workbook and filters for CLO positions.
 
     Args:
         data_packet_path: Path to the Structured Products Data Packet .xlsx file.
-        fhlb_only: If True, import only FHLB CLO holdings (PAM Portfolio 13091).
 
     Returns:
         DataFrame with one row per position.
@@ -107,9 +104,6 @@ def import_holdings(
     if "Portfolio View Level 4" in df.columns:
         df = df[df["Portfolio View Level 4"] == "CLO"].copy()
 
-    if fhlb_only and "PAM Portfolio" in df.columns:
-        df = df[df["PAM Portfolio"] == 13091].copy()
-
     print(f"  {len(df)} CLO positions imported.")
     return df.reset_index(drop=True)
 
@@ -140,6 +134,63 @@ def load_holdings_from_forecast_workbook(
 
     print(f"  {len(df)} holdings rows loaded.")
     return df
+
+
+def clean_holdings(holdings_df: pd.DataFrame) -> pd.DataFrame:
+    """Clean holdings data for Intex runs.
+
+    1. Fills in missing BBG date columns from Intex date columns when available.
+       - BBG_NC_END falls back to Non-Call End
+       - BBG_REINVEST_END falls back to Reinvest End
+    2. Drops any CUSIP that still has NA in any required Intex or BBG column.
+
+    Returns a cleaned copy of the DataFrame.
+    """
+    df = holdings_df.copy()
+    initial_cusips = df["CUSIP"].nunique()
+
+    # --- Fallback: fill missing BBG dates from Intex dates ---
+    if "BBG_NC_END" in df.columns and "Non-Call End" in df.columns:
+        filled = df["BBG_NC_END"].isna() & df["Non-Call End"].notna()
+        if filled.any():
+            df.loc[filled, "BBG_NC_END"] = df.loc[filled, "Non-Call End"]
+            print(f"  Filled {filled.sum()} missing BBG_NC_END values from Non-Call End.")
+
+    if "BBG_REINVEST_END" in df.columns and "Reinvest End" in df.columns:
+        filled = df["BBG_REINVEST_END"].isna() & df["Reinvest End"].notna()
+        if filled.any():
+            df.loc[filled, "BBG_REINVEST_END"] = df.loc[filled, "Reinvest End"]
+            print(f"  Filled {filled.sum()} missing BBG_REINVEST_END values from Reinvest End.")
+
+    # --- Drop CUSIPs with NA in any required Intex/BBG column ---
+    required_cols = [
+        "Intex Name", "Intex Deal Name", "AAA Margin",
+        "Orig Deal Balance", "BBG_NC_END", "BBG_REINVEST_END",
+        "RESET_IDX", "COLLAT_TYP",
+    ]
+    present_cols = [c for c in required_cols if c in df.columns]
+
+    if present_cols:
+        # Find CUSIPs where ANY position has NA in a required column.
+        na_mask = df[present_cols].isna().any(axis=1)
+        bad_cusips = df.loc[na_mask, "CUSIP"].unique()
+
+        if len(bad_cusips) > 0:
+            df = df[~df["CUSIP"].isin(bad_cusips)].copy()
+            final_cusips = df["CUSIP"].nunique()
+            print(f"  Dropped {len(bad_cusips)} CUSIPs with missing Intex/BBG data "
+                  f"({initial_cusips} -> {final_cusips} unique CUSIPs).")
+            for cusip in sorted(bad_cusips)[:10]:
+                # Show which columns were missing for debugging.
+                cusip_rows = holdings_df[holdings_df["CUSIP"] == cusip]
+                missing = [c for c in present_cols if cusip_rows[c].isna().any()]
+                print(f"    {cusip}: missing {missing}")
+            if len(bad_cusips) > 10:
+                print(f"    ... and {len(bad_cusips) - 10} more.")
+        else:
+            print(f"  All {initial_cusips} CUSIPs have complete Intex/BBG data.")
+
+    return df.reset_index(drop=True)
 
 
 def export_tranches(

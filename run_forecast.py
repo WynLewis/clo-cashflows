@@ -27,6 +27,7 @@ from forecast.cashflows_summary import generate_cashflow_summary, load_cashflows
 from forecast.factors import ForecastedFactors
 from forecast.forward_curve import load_from_cashflows_report, load_from_workbook
 from forecast.holdings import (
+    clean_holdings,
     export_tranches,
     import_holdings,
     load_holdings_from_forecast_workbook,
@@ -45,7 +46,6 @@ def run_full_workflow(
     preliminary_cashflows: str | Path | None = None,
     final_cashflows: str | Path | None = None,
     output_dir: str | Path | None = None,
-    fhlb_only: bool = False,
 ) -> None:
     """Execute the full 7-step forecast workflow.
 
@@ -60,7 +60,6 @@ def run_full_workflow(
         final_cashflows: Path to final Intex Cashflows export (Step 7).
                          If None, Step 7 is skipped.
         output_dir: Directory for output files. Defaults to current directory.
-        fhlb_only: If True, import only FHLB CLO holdings.
     """
     forecast_wb = Path(forecast_wb)
     output_dir = Path(output_dir) if output_dir else Path(".")
@@ -73,15 +72,18 @@ def run_full_workflow(
     print("=" * 70)
 
     if data_packet:
-        holdings_df = import_holdings(data_packet, fhlb_only=fhlb_only)
+        holdings_df = import_holdings(data_packet)
     else:
         holdings_df = load_holdings_from_forecast_workbook(forecast_wb)
 
-    # ── Step 2: Enrich with Intex/Bloomberg data ─────────────────────────
+    # ── Step 2: Enrich & Clean Holdings Data ─────────────────────────────
     print("\n" + "=" * 70)
-    print("STEP 2: Enrich Holdings Data")
+    print("STEP 2: Enrich & Clean Holdings Data")
     print("=" * 70)
     print("  Holdings data read from workbook (Intex/Bloomberg fields pre-populated).")
+
+    # Fill missing BBG dates from Intex, then drop CUSIPs with any remaining NAs.
+    holdings_df = clean_holdings(holdings_df)
 
     # Load pre-price deals and export tranches.
     preprice = PrePriceDeals.from_forecast_workbook(forecast_wb)
@@ -195,11 +197,6 @@ def main():
         default=".",
         help="Output directory for generated files.",
     )
-    parser.add_argument(
-        "--fhlb-only",
-        action="store_true",
-        help="Import only FHLB CLO holdings (PAM Portfolio 13091).",
-    )
     args = parser.parse_args()
 
     run_full_workflow(
@@ -208,7 +205,6 @@ def main():
         preliminary_cashflows=args.preliminary_cashflows,
         final_cashflows=args.final_cashflows,
         output_dir=args.output_dir,
-        fhlb_only=args.fhlb_only,
     )
 
 
