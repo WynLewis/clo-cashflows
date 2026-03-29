@@ -86,6 +86,47 @@ def load_scenarios_from_dataframe(df: pd.DataFrame) -> list[Scenario]:
     return scenarios
 
 
+def load_scenarios_from_config() -> list[Scenario]:
+    """Build Scenario objects from the ScenarioConfig in forecast/config.py.
+
+    This lets you define the current spread level and scenario shocks in Python
+    without needing the Excel workbook's Scenario Setup sheet.
+
+    Usage:
+        from forecast.config import CONFIG
+
+        # Set current AAA spread and settle date
+        CONFIG.scenario.current_aaa_margin_bps = 120
+        CONFIG.scenario.settle_date = date(2026, 3, 18)
+        CONFIG.scenario.prepay_speed = 15
+
+        # Define scenarios (or keep the defaults)
+        CONFIG.scenario.scenarios = [
+            ScenarioDefinition("100 bps Tightening", -100),
+            ScenarioDefinition("Flat", 0),
+            ScenarioDefinition("100 bps Widening", 100),
+        ]
+
+        scenarios = load_scenarios_from_config()
+    """
+    sc = CONFIG.scenario
+    scenarios = []
+    for i, defn in enumerate(sc.scenarios, start=1):
+        scenarios.append(Scenario(
+            number=i,
+            name=defn.name,
+            settle_date=sc.settle_date,
+            initial_aaa_margin=sc.current_aaa_margin_bps,
+            aaa_margin_shock=defn.aaa_margin_shock_bps,
+            prepay_speed=sc.prepay_speed,
+            horizon_given_type=sc.horizon_given_type,
+        ))
+    print(f"  {len(scenarios)} scenarios loaded from config "
+          f"(current AAA margin = {sc.current_aaa_margin_bps} bps, "
+          f"settle = {sc.settle_date}).")
+    return scenarios
+
+
 # ---------------------------------------------------------------------------
 # Optional Redemption logic
 # ---------------------------------------------------------------------------

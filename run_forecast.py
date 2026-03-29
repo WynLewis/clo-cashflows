@@ -24,6 +24,7 @@ from datetime import date
 from pathlib import Path
 
 from forecast.cashflows_summary import generate_cashflow_summary, load_cashflows_reports
+from forecast.config import CONFIG
 from forecast.factors import ForecastedFactors
 from forecast.forward_curve import load_from_cashflows_report, load_from_workbook
 from forecast.holdings import (
@@ -35,6 +36,7 @@ from forecast.holdings import (
 from forecast.preprice import PrePriceDeals
 from forecast.scenarios import (
     generate_portfolio_upload,
+    load_scenarios_from_config,
     load_scenarios_from_workbook,
     write_portfolio_upload,
 )
@@ -89,8 +91,11 @@ def run_full_workflow(
     preprice = PrePriceDeals.from_forecast_workbook(forecast_wb)
     tranches = export_tranches(holdings_df, preprice)
 
-    # Load scenarios.
-    scenarios = load_scenarios_from_workbook(forecast_wb)
+    # Load scenarios — from config if defined, otherwise from workbook.
+    if CONFIG.scenario.scenarios:
+        scenarios = load_scenarios_from_config()
+    else:
+        scenarios = load_scenarios_from_workbook(forecast_wb)
 
     # ── Step 3: Clear forecasted factors ─────────────────────────────────
     print("\n" + "=" * 70)
