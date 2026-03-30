@@ -206,7 +206,7 @@ def enrich_holdings(
     holdings_df: pd.DataFrame,
     preprice_deals: PrePriceDeals,
     output_path: str | Path,
-    wait_seconds: int = 120,
+    wait_seconds: int = 300,
 ) -> pd.DataFrame:
     """Enrich holdings with Intex/BBG data via xlwings (fully automated).
 
@@ -322,32 +322,58 @@ def enrich_holdings(
     owb.close()
     print(f"  {len(unique_df)} CUSIPs written to: {output_path}")
 
-    # ── Phase 2: Open in Excel via xlwings to calculate formulas ─────────
+    # ── Phase 2: Open in existing Excel via xlwings to calculate formulas ──
+    # IMPORTANT: We attach to the running Excel instance (where Bloomberg is
+    # already connected) rather than launching a new one.  This fixes the
+    # Bloomberg #N/A Connection error.
     print(f"Phase 2: Opening in Excel to calculate formulas (up to {wait_seconds}s)...")
     import xlwings as xw
 
-    app = xw.App(visible=True)
+    # Try to attach to an existing Excel instance first.
+    # If none is running, start a new one (Bloomberg BDP won't work but Intex may).
+    app = None
+    launched_new = False
+    try:
+        apps = xw.apps
+        if len(apps) > 0:
+            app = apps[0]  # Attach to the first running Excel instance.
+            print("  Attached to existing Excel instance (Bloomberg connection preserved).")
+        else:
+            app = xw.App(visible=True)
+            launched_new = True
+            print("  No existing Excel found — launched new instance.")
+            print("  NOTE: Bloomberg BDP formulas may not work without an active Terminal.")
+    except Exception:
+        app = xw.App(visible=True)
+        launched_new = True
+
     wb = None
     data = None
     try:
-        # Give Excel a moment to fully initialize add-ins before opening.
-        time.sleep(5)
-
         wb = app.books.open(str(output_path))
         ws = wb.sheets["Holdings"]
+
+        # Give IntexLINK and Bloomberg add-ins time to initialize and start
+        # processing the formulas.  IntexLINK in particular needs time to
+        # connect to its server and begin resolving formulas.
+        initial_wait = 30
+        print(f"  Waiting {initial_wait}s for add-ins to initialize and begin calculating...")
+        time.sleep(initial_wait)
 
         # Force recalculation.
         app.calculation = "automatic"
         app.calculate()
 
-        elapsed = 0
-        poll_interval = 5
+        # Poll until formulas resolve.  Check the AAA Margin column (numeric)
+        # since string columns like Intex Name might legitimately contain text.
+        elapsed = initial_wait
+        poll_interval = 10
         while elapsed < wait_seconds:
             time.sleep(poll_interval)
             elapsed += poll_interval
             try:
                 app.calculate()
-                # Spot-check: AAA Margin for the first non-pre-price CUSIP.
+                # Spot-check: AAA Margin for first and last CUSIP.
                 test_val = ws.cells(2, intex_name_col_idx + 2).value
                 if test_val is not None and not isinstance(test_val, str):
                     last_row = len(unique_df) + 1
@@ -358,10 +384,15 @@ def enrich_holdings(
             except Exception:
                 pass
             if elapsed % 30 == 0:
-                print(f"  Still waiting... ({elapsed}s)")
+                # Show current state of a test cell for debugging.
+                try:
+                    sample = ws.cells(2, intex_name_col_idx).value
+                    print(f"  Still waiting... ({elapsed}s) — sample Intex Name cell = {sample!r}")
+                except Exception:
+                    print(f"  Still waiting... ({elapsed}s)")
         else:
             print(f"  WARNING: Timed out after {wait_seconds}s. Some formulas may not have calculated.")
-            print(f"  The file has been saved — you can open it manually to check.")
+            print(f"  The file has been saved — you can open it manually to verify.")
 
         # Save with calculated values.
         wb.save()
@@ -382,10 +413,12 @@ def enrich_holdings(
                 wb.close()
             except Exception:
                 pass
-        try:
-            app.quit()
-        except Exception:
-            pass
+        # Only quit Excel if we launched a new instance.
+        if launched_new:
+            try:
+                app.quit()
+            except Exception:
+                pass
 
     # Merge enriched columns back onto the full (multi-position) holdings.
     enriched_df = data
