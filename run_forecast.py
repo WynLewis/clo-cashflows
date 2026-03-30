@@ -98,7 +98,8 @@ def run_full_workflow(
     holdings_df = clean_holdings(holdings_df)
 
     # Load pre-price deals and export tranches.
-    preprice = PrePriceDeals.from_forecast_workbook(forecast_wb)
+    # Pre-price deals skipped — unpriced CUSIPs get dropped by clean_holdings.
+    preprice = PrePriceDeals()
     tranches = export_tranches(holdings_df, preprice)
 
     # Load scenarios — from config if defined, otherwise from workbook.
