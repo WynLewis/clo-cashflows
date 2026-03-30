@@ -1,12 +1,14 @@
 """
 Reporting and visualization for CLO cashflow forecasts.
 
-Adds the functionality from CLO_FHLB_CashflowForecast.ipynb and
-CLO_Derivaties_CashflowForecast.ipynb:
+Builds reports directly from in-memory Python data — no Excel round-trip.
+
+Features (from CLO_FHLB_CashflowForecast.ipynb and
+CLO_Derivaties_CashflowForecast.ipynb):
   - Balance scenario chart (line plot across all scenarios)
   - Quarterly balance roll-up (snap to quarter-end dates)
   - Hedging output (first 2 payment dates and balances per CUSIP)
-  - Read and parse multi-scenario cashflow summary workbooks
+  - Per-scenario and per-CUSIP cashflow breakdowns
 """
 
 from __future__ import annotations
@@ -18,129 +20,106 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from forecast.models import CashflowsReport, Scenario
+
 
 # ---------------------------------------------------------------------------
-# Parse a multi-scenario cashflow summary workbook
+# Build per-scenario DataFrames from in-memory CashflowsReport objects
 # ---------------------------------------------------------------------------
 
-def read_cashflow_summary(
-    cashflow_path: str | Path,
-    scenario_names: Optional[list[str]] = None,
-) -> dict[str, pd.DataFrame]:
-    """Read a cashflow summary workbook with one sheet per scenario.
-
-    Each sheet has: Date, then groups of (Interest, Principal, Balance) per CUSIP,
-    with CUSIPs in row 1 and headers (Interest/Principal/Balance) in row 3.
-
-    Args:
-        cashflow_path: Path to the cashflow summary Excel file (the output of
-            Step 7 or the existing 'CLO Balance Forecast' workbooks).
-        scenario_names: Optional list of sheet names to read. If None, reads all
-            non-"Summary"/"Balance Summary" sheets.
+def build_scenario_cashflows(
+    reports: list[CashflowsReport],
+) -> dict[str, dict[str, pd.DataFrame]]:
+    """Organize CashflowsReport objects into per-scenario, per-CUSIP DataFrames.
 
     Returns:
-        Dict mapping scenario name -> DataFrame with Date index and per-CUSIP
-        Interest/Principal/Balance columns.
+        Dict[scenario_name -> Dict["dates"/"interest"/"principal"/"balance" -> DataFrame]]
+        Each DataFrame has Date index and one column per CUSIP.
     """
-    cashflow_path = Path(cashflow_path)
-    xls = pd.ExcelFile(cashflow_path, engine="openpyxl")
+    # Group reports by scenario.
+    by_scenario: dict[str, list[CashflowsReport]] = {}
+    for r in reports:
+        by_scenario.setdefault(r.scenario_name, []).append(r)
 
-    skip_sheets = {"Summary", "Balance Summary", "Sheet1"}
-    if scenario_names is None:
-        scenario_names = [s for s in xls.sheet_names if s not in skip_sheets]
-
-    results = {}
-    for name in scenario_names:
-        if name not in xls.sheet_names:
+    result = {}
+    for scen_name, scen_reports in by_scenario.items():
+        # Collect all dates across reports.
+        all_dates: set[date] = set()
+        for r in scen_reports:
+            all_dates.update(r.cashflows.keys())
+        sorted_dates = sorted(all_dates)
+        if not sorted_dates:
             continue
 
-        # Try reading with header row 2 (0-indexed), which is the format
-        # from the existing CLO Balance Forecast workbooks.
-        df = pd.read_excel(xls, sheet_name=name, header=2)
-        df = df.fillna(0.0)
+        interest_data = {}
+        principal_data = {}
+        balance_data = {}
 
-        # Rename the first unnamed column to "Date".
-        first_col = df.columns[0]
-        if "unnamed" in str(first_col).lower() or first_col == "Date":
-            df = df.rename(columns={first_col: "Date"})
+        for r in scen_reports:
+            label = r.cusip or r.tranche or r.ws_name
+            int_vals, prin_vals, bal_vals = [], [], []
+            prev_bal = r.orig_principal
 
-        results[name] = df
+            for d in sorted_dates:
+                cf = r.cashflows.get(d)
+                if cf:
+                    int_vals.append(cf.interest)
+                    prin_vals.append(cf.principal)
+                    bal_vals.append(cf.balance)
+                    prev_bal = cf.balance
+                else:
+                    int_vals.append(0.0)
+                    prin_vals.append(0.0)
+                    bal_vals.append(prev_bal)
 
-    return results
+            interest_data[label] = int_vals
+            principal_data[label] = prin_vals
+            balance_data[label] = bal_vals
 
+        dates_series = pd.to_datetime(sorted_dates)
+        result[scen_name] = {
+            "interest": pd.DataFrame(interest_data, index=dates_series),
+            "principal": pd.DataFrame(principal_data, index=dates_series),
+            "balance": pd.DataFrame(balance_data, index=dates_series),
+        }
 
-def extract_cusip_names(
-    cashflow_path: str | Path,
-    sheet_name: str = "Scenario 1",
-) -> list[str]:
-    """Extract CUSIP identifiers from row 1 of a cashflow summary sheet.
-
-    The first row of each scenario sheet contains CUSIPs above each group
-    of Interest/Principal/Balance columns.  CUSIPs of 'XXXXXXXXX' or blank
-    are replaced by the column header.
-    """
-    df = pd.read_excel(cashflow_path, sheet_name=sheet_name, nrows=1, header=None)
-    df = df.dropna(axis="columns")
-    tranches = df.T
-    tranches.columns = ["cusip"]
-    tranches["cusip"] = tranches["cusip"].astype(str)
-
-    names = []
-    for idx, row in tranches.iterrows():
-        cusip = row["cusip"]
-        if cusip in ("XXXXXXXXX", "", "nan"):
-            names.append(str(idx))
-        else:
-            names.append(cusip)
-
-    return names[1:]  # Skip the first (Date column).
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Aggregate balances across scenarios
+# Balance summary across scenarios
 # ---------------------------------------------------------------------------
 
 def build_balance_summary(
-    scenario_data: dict[str, pd.DataFrame],
-    cusip_names: Optional[list[str]] = None,
+    reports: list[CashflowsReport],
+    scenario_labels: Optional[dict[str, str]] = None,
 ) -> pd.DataFrame:
     """Build a portfolio-level balance summary across all scenarios.
 
     Args:
-        scenario_data: Dict from read_cashflow_summary().
-        cusip_names: Optional CUSIP names for column renaming.
+        reports: List of CashflowsReport objects.
+        scenario_labels: Optional mapping from scenario_name to display label.
 
     Returns:
         DataFrame with Date index and one column per scenario (total balance).
     """
-    # Find the scenario with the most rows (longest cashflow horizon).
-    max_len = 0
-    max_scenario = None
-    for name, df in scenario_data.items():
-        if len(df) > max_len:
-            max_len = len(df)
-            max_scenario = name
+    scen_data = build_scenario_cashflows(reports)
 
-    index_values = scenario_data[max_scenario]["Date"].values
-    balance_arrays = {}
+    # Find the longest date range.
+    all_dates: set = set()
+    for sd in scen_data.values():
+        all_dates.update(sd["balance"].index)
+    sorted_dates = sorted(all_dates)
 
-    for name, df in scenario_data.items():
-        balance_cols = [c for c in df.columns if "Balance" in str(c)]
-        if balance_cols and balance_cols[0] in ("Balance", "Portfolio Balance"):
-            balance_cols = balance_cols[1:]  # Skip portfolio-level if present
+    balance_cols = {}
+    for scen_name, sd in scen_data.items():
+        total = sd["balance"].sum(axis=1)
+        # Reindex to the full date range, forward-filling.
+        total = total.reindex(sorted_dates, method="ffill")
+        label = (scenario_labels or {}).get(scen_name, scen_name)
+        balance_cols[label] = total.values
 
-        if not balance_cols:
-            continue
-
-        total_balance = df[balance_cols].sum(axis=1).values
-
-        # Pad shorter scenarios to match the longest.
-        while len(total_balance) < max_len:
-            total_balance = np.append(total_balance, total_balance[-1])
-
-        balance_arrays[name] = total_balance
-
-    return pd.DataFrame(balance_arrays, index=index_values)
+    return pd.DataFrame(balance_cols, index=sorted_dates)
 
 
 # ---------------------------------------------------------------------------
@@ -148,43 +127,33 @@ def build_balance_summary(
 # ---------------------------------------------------------------------------
 
 def quarterly_rollup(
-    scenario_data: dict[str, pd.DataFrame],
-    cusip_names: list[str],
+    reports: list[CashflowsReport],
     scenario_name: str = "Scenario 5",
 ) -> pd.DataFrame:
-    """Snap per-CUSIP balances to quarter-end dates.
-
-    Takes a single scenario's cashflow data and returns balances at
-    each quarter-end (the last cashflow date before each quarter boundary).
+    """Snap per-CUSIP balances to quarter-end dates for a given scenario.
 
     Args:
-        scenario_data: Dict from read_cashflow_summary().
-        cusip_names: CUSIP identifiers for column names.
+        reports: List of CashflowsReport objects.
         scenario_name: Which scenario to use (default "Scenario 5" = Flat).
 
     Returns:
-        DataFrame with quarter-end dates and per-CUSIP balances.
+        DataFrame with quarter-end Date column and per-CUSIP balance columns.
     """
-    df = scenario_data[scenario_name].copy()
+    scen_data = build_scenario_cashflows(reports)
+    if scenario_name not in scen_data:
+        available = list(scen_data.keys())
+        raise ValueError(f"Scenario '{scenario_name}' not found. Available: {available}")
 
-    balance_cols = [c for c in df.columns if "Balance" in str(c)]
-    if balance_cols and balance_cols[0] in ("Balance", "Portfolio Balance"):
-        balance_cols = balance_cols[1:]
-
-    # Build balance-only DataFrame with CUSIP names.
-    bal_df = df[balance_cols].copy()
-    if len(cusip_names) == len(bal_df.columns):
-        bal_df.columns = cusip_names
-    bal_df.index = pd.to_datetime(df["Date"])
+    bal_df = scen_data[scenario_name]["balance"].copy()
+    bal_df.index.name = "Date"
     bal_df = bal_df.reset_index()
-    bal_df = bal_df.rename(columns={"index": "Date"})
 
-    # Compute quarter-end dates.
+    # Compute quarter-end for each date.
     bal_df["Qdate"] = [
         d - pd.tseries.offsets.DateOffset(days=1) + pd.tseries.offsets.QuarterEnd()
         for d in bal_df["Date"]
     ]
-    quarters = bal_df["Qdate"].unique()
+    quarters = sorted(bal_df["Qdate"].unique())
 
     # Find the last cashflow date before each quarter-end.
     qe_dates = []
@@ -205,53 +174,34 @@ def quarterly_rollup(
 # ---------------------------------------------------------------------------
 
 def hedging_output(
-    scenario_data: dict[str, pd.DataFrame],
-    cusip_names: list[str],
+    reports: list[CashflowsReport],
     scenario_name: str = "Scenario 5",
 ) -> pd.DataFrame:
-    """Generate a hedging table with first 2 payment dates and balances per CUSIP.
-
-    For derivatives desk use — shows when each tranche starts paying and
-    the outstanding balance at those dates.
+    """Generate a hedging table: first 2 payment dates and balances per CUSIP.
 
     Args:
-        scenario_data: Dict from read_cashflow_summary().
-        cusip_names: CUSIP identifiers.
+        reports: List of CashflowsReport objects.
         scenario_name: Which scenario to use (default "Scenario 5" = Flat).
 
     Returns:
-        DataFrame with columns: CUSIP, Payment Date 1, Balance 1, Payment Date 2, Balance 2
+        DataFrame with CUSIP, Payment Date 1, Balance 1, Payment Date 2, Balance 2.
     """
-    df = scenario_data[scenario_name].copy()
+    scen_data = build_scenario_cashflows(reports)
+    if scenario_name not in scen_data:
+        available = list(scen_data.keys())
+        raise ValueError(f"Scenario '{scenario_name}' not found. Available: {available}")
 
-    interest_cols = [c for c in df.columns if "Interest" in str(c)]
-    balance_cols = [c for c in df.columns if "Balance" in str(c)]
-
-    if interest_cols and interest_cols[0] in ("Interest", "Portfolio Interest"):
-        interest_cols = interest_cols[1:]
-    if balance_cols and balance_cols[0] in ("Balance", "Portfolio Balance"):
-        balance_cols = balance_cols[1:]
-
-    interest_df = df[interest_cols].copy()
-    balance_df = df[balance_cols].copy()
-
-    if len(cusip_names) == len(interest_df.columns):
-        interest_df.columns = cusip_names
-        balance_df.columns = cusip_names
-
-    dates = pd.to_datetime(df["Date"])
+    int_df = scen_data[scenario_name]["interest"]
+    bal_df = scen_data[scenario_name]["balance"]
 
     rows = []
-    for cusip in cusip_names:
-        if cusip not in interest_df.columns:
-            continue
-
-        # Find rows where interest is non-zero (payment dates).
-        paying = interest_df[interest_df[cusip] != 0].index
-        pd1 = str(dates.iloc[paying[0]].date()) if len(paying) >= 1 else "NA"
-        bal1 = balance_df[cusip].iloc[paying[0]] if len(paying) >= 1 else "NA"
-        pd2 = str(dates.iloc[paying[1]].date()) if len(paying) >= 2 else "NA"
-        bal2 = balance_df[cusip].iloc[paying[1]] if len(paying) >= 2 else "NA"
+    for cusip in int_df.columns:
+        # Find rows where interest is non-zero.
+        paying = int_df.index[int_df[cusip] != 0]
+        pd1 = str(paying[0].date()) if len(paying) >= 1 else "NA"
+        bal1 = bal_df.loc[paying[0], cusip] if len(paying) >= 1 else "NA"
+        pd2 = str(paying[1].date()) if len(paying) >= 2 else "NA"
+        bal2 = bal_df.loc[paying[1], cusip] if len(paying) >= 2 else "NA"
 
         rows.append({
             "CUSIP": cusip,
@@ -276,8 +226,7 @@ def plot_balance_scenarios(
     """Plot portfolio balance across all scenarios.
 
     Args:
-        balance_df: DataFrame from build_balance_summary() with Date index
-            and one column per scenario.
+        balance_df: DataFrame from build_balance_summary().
         title: Chart title.
         figsize: Figure size.
 
@@ -302,72 +251,60 @@ def plot_balance_scenarios(
 
 
 # ---------------------------------------------------------------------------
-# Full reporting output (mirrors the FHLB notebook)
+# Full report generation
 # ---------------------------------------------------------------------------
 
 def generate_report(
-    cashflow_path: str | Path,
+    reports: list[CashflowsReport],
     output_path: str | Path,
     flat_scenario: str = "Scenario 5",
-    scenario_labels: Optional[list[str]] = None,
-) -> None:
-    """Generate the full reporting output from a cashflow summary workbook.
+    scenario_labels: Optional[dict[str, str]] = None,
+) -> pd.DataFrame:
+    """Generate the full reporting output from in-memory cashflow data.
 
     Produces an Excel file with:
       - Balance Summary: portfolio balance across all scenarios
       - Quarterly Forecasting: per-CUSIP balances at quarter-ends (flat scenario)
       - Hedging: first 2 payment dates/balances per CUSIP (flat scenario)
 
-    Also displays a balance scenario chart.
+    Also saves a balance scenario chart as PNG.
 
     Args:
-        cashflow_path: Path to the cashflow summary Excel file.
+        reports: List of CashflowsReport objects (from load_cashflows_reports).
         output_path: Path to write the report workbook.
-        flat_scenario: Name of the flat/base scenario sheet.
-        scenario_labels: Optional friendly labels for scenarios.
+        flat_scenario: Name of the flat/base scenario.
+        scenario_labels: Optional {scenario_name: display_label} mapping.
+
+    Returns:
+        The balance summary DataFrame.
     """
-    cashflow_path = Path(cashflow_path)
     output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if scenario_labels is None:
-        scenario_labels = [
-            "75 Tight", "50 Tight", "25 Tight", "10 Tight",
-            "Flat", "10 Wide", "25 Wide", "50 Wide",
-        ]
+    print(f"Generating report...")
 
-    print(f"Generating report from '{cashflow_path.name}'...")
+    # Build outputs from in-memory data.
+    balance_df = build_balance_summary(reports, scenario_labels)
+    qe = quarterly_rollup(reports, flat_scenario)
+    hedging = hedging_output(reports, flat_scenario)
 
-    # Read data.
-    cusip_names = extract_cusip_names(cashflow_path)
-    scenario_data = read_cashflow_summary(cashflow_path)
-
-    # Balance summary.
-    balance_df = build_balance_summary(scenario_data, cusip_names)
-    if len(scenario_labels) == len(balance_df.columns):
-        balance_df.columns = scenario_labels
-
-    # Quarterly roll-up (flat scenario).
-    qe = quarterly_rollup(scenario_data, cusip_names, flat_scenario)
-
-    # Hedging output (flat scenario).
-    hedging = hedging_output(scenario_data, cusip_names, flat_scenario)
-
-    # Write report.
+    # Write Excel report.
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         balance_df.to_excel(writer, sheet_name="Balance Summary")
         qe.to_excel(writer, sheet_name="Quarterly Forecasting", index=False)
         hedging.to_excel(writer, sheet_name="Hedging", index=False)
 
     print(f"  Report written to '{output_path.name}'.")
-    print(f"    Balance Summary: {len(balance_df)} periods × {len(balance_df.columns)} scenarios")
-    print(f"    Quarterly Forecasting: {len(qe)} quarter-ends × {len(cusip_names)} CUSIPs")
+    print(f"    Balance Summary: {len(balance_df)} periods x {len(balance_df.columns)} scenarios")
+    print(f"    Quarterly Forecasting: {len(qe)} quarter-ends x {len(qe.columns) - 1} CUSIPs")
     print(f"    Hedging: {len(hedging)} CUSIPs")
 
-    # Plot.
+    # Chart.
     try:
         fig = plot_balance_scenarios(balance_df)
-        fig.savefig(output_path.with_suffix(".png"), dpi=150, bbox_inches="tight")
-        print(f"    Chart saved to '{output_path.with_suffix('.png').name}'.")
+        chart_path = output_path.with_suffix(".png")
+        fig.savefig(chart_path, dpi=150, bbox_inches="tight")
+        print(f"    Chart saved to '{chart_path.name}'.")
     except Exception as e:
         print(f"    Chart generation skipped: {e}")
 
