@@ -103,7 +103,7 @@ def run_full_workflow(
     tranches = export_tranches(holdings_df, preprice)
 
     # Load scenarios — from config if defined, otherwise from workbook.
-    if CONFIG.scenario.scenarios:
+    if CONFIG.defaults.scenarios:
         scenarios = load_scenarios_from_config()
     else:
         scenarios = load_scenarios_from_workbook(forecast_wb)

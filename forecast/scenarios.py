@@ -87,43 +87,37 @@ def load_scenarios_from_dataframe(df: pd.DataFrame) -> list[Scenario]:
 
 
 def load_scenarios_from_config() -> list[Scenario]:
-    """Build Scenario objects from the ScenarioConfig in forecast/config.py.
+    """Build Scenario objects from CONFIG.
 
-    This lets you define the current spread level and scenario shocks in Python
-    without needing the Excel workbook's Scenario Setup sheet.
+    Current spread comes from CONFIG.scenario.current_aaa_margin_bps.
+    Everything else (settle date, prepay, scenario list) from CONFIG.defaults.
 
     Usage:
-        from forecast.config import CONFIG
+        from forecast.config import CONFIG, ScenarioDefinition
 
-        # Set current AAA spread and settle date
-        CONFIG.scenario.current_aaa_margin_bps = 120
-        CONFIG.scenario.settle_date = date(2026, 3, 18)
-        CONFIG.scenario.prepay_speed = 15
-
-        # Define scenarios (or keep the defaults)
-        CONFIG.scenario.scenarios = [
-            ScenarioDefinition("100 bps Tightening", -100),
-            ScenarioDefinition("Flat", 0),
-            ScenarioDefinition("100 bps Widening", 100),
-        ]
+        CONFIG.scenario.current_aaa_margin_bps = 120   # only thing you set each run
+        # CONFIG.defaults.settle_date = date(2026, 3, 18)  # change if needed
+        # CONFIG.defaults.prepay_speed = 15                # change if needed
+        # CONFIG.defaults.scenarios = [...]                # change if needed
 
         scenarios = load_scenarios_from_config()
     """
     sc = CONFIG.scenario
+    d = CONFIG.defaults
     scenarios = []
-    for i, defn in enumerate(sc.scenarios, start=1):
+    for i, defn in enumerate(d.scenarios, start=1):
         scenarios.append(Scenario(
             number=i,
             name=defn.name,
-            settle_date=sc.settle_date,
+            settle_date=d.settle_date,
             initial_aaa_margin=sc.current_aaa_margin_bps,
             aaa_margin_shock=defn.aaa_margin_shock_bps,
-            prepay_speed=sc.prepay_speed,
-            horizon_given_type=sc.horizon_given_type,
+            prepay_speed=d.prepay_speed,
+            horizon_given_type=d.horizon_given_type,
         ))
     print(f"  {len(scenarios)} scenarios loaded from config "
           f"(current AAA margin = {sc.current_aaa_margin_bps} bps, "
-          f"settle = {sc.settle_date}).")
+          f"settle = {d.settle_date}).")
     return scenarios
 
 
