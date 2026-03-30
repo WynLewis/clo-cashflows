@@ -202,6 +202,173 @@ def load_holdings_from_forecast_workbook(
     return df
 
 
+def enrich_holdings(
+    holdings_df: pd.DataFrame,
+    preprice_deals: PrePriceDeals,
+    output_path: str | Path,
+) -> None:
+    """Write holdings to an Excel file with IntexLINK and Bloomberg BDP formulas.
+
+    This bridges the gap between Python and the Intex/Bloomberg Excel add-ins.
+    The workflow is:
+        1. Python writes this file with formulas in the Intex/BBG columns.
+        2. You open it in Excel (with IntexLINK and Bloomberg add-ins active).
+        3. Formulas calculate and populate the data.
+        4. Save the file.
+        5. Python reads it back with load_enriched_holdings().
+
+    For pre-price CUSIPs, the Intex Name and Deal Name are written as static
+    values (from the Pre-Price Deals table) instead of formulas.
+
+    Args:
+        holdings_df: Raw holdings DataFrame (from any loading method).
+        preprice_deals: PrePriceDeals lookup for overriding Intex identifiers.
+        output_path: Path to write the enrichment workbook.
+    """
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+
+    output_path = Path(output_path)
+    print(f"Writing enrichment workbook to '{output_path.name}'...")
+
+    # Deduplicate to unique CUSIPs (sum face/par).
+    group_cols = ["CUSIP"]
+    agg_cols = {}
+    for col in holdings_df.columns:
+        if col == "CUSIP":
+            continue
+        elif col in ("Original Face", "Current Par", "Book Value", "Market Value"):
+            agg_cols[col] = "sum"
+        else:
+            agg_cols[col] = "first"
+    unique_df = holdings_df.groupby("CUSIP", as_index=False).agg(agg_cols)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Holdings"
+
+    # Define columns: existing data + Intex/BBG formula columns.
+    base_cols = ["CUSIP", "Description", "Entity Name", "PAM Portfolio",
+                 "Original Face", "Current Par", "Price", "OAS", "Floater"]
+    intex_cols = ["Intex Name", "Intex Deal Name", "AAA Margin",
+                  "Non-Call End", "Reinvest End", "Orig Deal Balance"]
+    bbg_cols = ["BBG_NC_END", "BBG_REINVEST_END", "RESET_IDX", "COLLAT_TYP"]
+    all_cols = base_cols + intex_cols + bbg_cols
+
+    # Write headers.
+    for col_idx, col_name in enumerate(all_cols, 1):
+        ws.cell(row=1, column=col_idx, value=col_name)
+
+    # Write data rows with formulas.
+    for row_idx, (_, row) in enumerate(unique_df.iterrows(), 2):
+        cusip = str(row.get("CUSIP", ""))
+
+        # Write base data columns.
+        for col_idx, col_name in enumerate(base_cols, 1):
+            val = row.get(col_name)
+            if pd.notna(val):
+                ws.cell(row=row_idx, column=col_idx, value=val)
+
+        cusip_col = "A"  # CUSIP is always column A
+        cusip_ref = f"${cusip_col}${row_idx}"
+
+        # -- Intex columns --
+        intex_name_col_idx = base_cols.index("CUSIP") + len(base_cols) + 1  # First intex col
+        intex_name_col = get_column_letter(intex_name_col_idx)
+        intex_deal_col = get_column_letter(intex_name_col_idx + 1)
+
+        if preprice_deals.get_identifier(cusip) != "N/A":
+            # Pre-price: write static values.
+            ws.cell(row=row_idx, column=intex_name_col_idx,
+                    value=preprice_deals.get_name(cusip))
+            ws.cell(row=row_idx, column=intex_name_col_idx + 1,
+                    value=preprice_deals.get_deal_name(cusip))
+        else:
+            # Regular: write IntexLINK formulas.
+            ws.cell(row=row_idx, column=intex_name_col_idx,
+                    value=f'=INTEX({cusip_ref},"INTEX_DEAL")')
+            ws.cell(row=row_idx, column=intex_name_col_idx + 1,
+                    value=f'=INTEX({cusip_ref},"DEAL_DEALNAME")')
+
+        # AAA Margin — references the Intex Name cell.
+        intex_name_ref = f"${intex_name_col}${row_idx}"
+        ws.cell(row=row_idx, column=intex_name_col_idx + 2,
+                value=f'=INTEX({intex_name_ref},"INTXDA_TRBLOCK_FLOAT_MARGIN[AAA]")')
+
+        # Non-Call End, Reinvest End, Orig Deal Balance.
+        ws.cell(row=row_idx, column=intex_name_col_idx + 3,
+                value=f'=INTEX({intex_name_ref},"DEAL_CALLABLE_AS_OF_DATE")')
+        ws.cell(row=row_idx, column=intex_name_col_idx + 4,
+                value=f'=INTEX({intex_name_ref},"DEAL_REINV_END_DATE")')
+        ws.cell(row=row_idx, column=intex_name_col_idx + 5,
+                value=f'=INTEX({intex_name_ref},"DEAL_ORIGBAL")')
+
+        # -- Bloomberg columns --
+        bbg_start_col_idx = intex_name_col_idx + len(intex_cols)
+        bbg_cusip_ref = f'{cusip_ref}&" CUSIP"'
+
+        ws.cell(row=row_idx, column=bbg_start_col_idx,
+                value=f'=BDP({bbg_cusip_ref},"MTG_DEAL_CALL_DT")')
+        ws.cell(row=row_idx, column=bbg_start_col_idx + 1,
+                value=f'=BDP({bbg_cusip_ref},"REINVEST_END_DATE")')
+        ws.cell(row=row_idx, column=bbg_start_col_idx + 2,
+                value=f'=BDP({bbg_cusip_ref},"RESET_IDX")')
+        ws.cell(row=row_idx, column=bbg_start_col_idx + 3,
+                value=f'=BDP({bbg_cusip_ref},"COLLAT_TYP")')
+
+    wb.save(output_path)
+    print(f"  {len(unique_df)} CUSIPs written with IntexLINK and Bloomberg formulas.")
+    print(f"  Next steps:")
+    print(f"    1. Open '{output_path.name}' in Excel (with IntexLINK + Bloomberg add-ins)")
+    print(f"    2. Wait for all formulas to calculate")
+    print(f"    3. Fix any #N/A errors (especially pre-price deals)")
+    print(f"    4. Save the file")
+    print(f"    5. Come back here and run load_enriched_holdings('{output_path.name}')")
+
+
+def load_enriched_holdings(
+    enriched_path: str | Path,
+    original_holdings_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Read back an enriched holdings file (after formulas have calculated in Excel).
+
+    Merges the Intex/BBG columns from the enrichment workbook back onto the
+    full (non-deduplicated) holdings DataFrame so all positions get the data.
+
+    Args:
+        enriched_path: Path to the enrichment workbook (saved after formulas calculated).
+        original_holdings_df: The original holdings DataFrame (with all positions).
+
+    Returns:
+        Holdings DataFrame with Intex/BBG columns merged in.
+    """
+    enriched_path = Path(enriched_path)
+    print(f"Loading enriched data from '{enriched_path.name}'...")
+
+    enriched_df = pd.read_excel(enriched_path, sheet_name="Holdings", engine="openpyxl")
+
+    # The enriched file has one row per CUSIP.  Merge the Intex/BBG columns
+    # onto the original (multi-position) holdings by CUSIP.
+    merge_cols = ["Intex Name", "Intex Deal Name", "AAA Margin",
+                  "Non-Call End", "Reinvest End", "Orig Deal Balance",
+                  "BBG_NC_END", "BBG_REINVEST_END", "RESET_IDX", "COLLAT_TYP"]
+    present_cols = [c for c in merge_cols if c in enriched_df.columns]
+
+    # Drop these columns from original if they exist (will be replaced).
+    drop_cols = [c for c in present_cols if c in original_holdings_df.columns]
+    result = original_holdings_df.drop(columns=drop_cols, errors="ignore")
+
+    # Merge.
+    enriched_subset = enriched_df[["CUSIP"] + present_cols].drop_duplicates(subset=["CUSIP"])
+    result = result.merge(enriched_subset, on="CUSIP", how="left")
+
+    populated = result[present_cols].notna().all(axis=1).sum()
+    total = len(result)
+    print(f"  {populated}/{total} positions fully enriched.")
+
+    return result
+
+
 def clean_holdings(holdings_df: pd.DataFrame) -> pd.DataFrame:
     """Clean holdings data for Intex runs.
 

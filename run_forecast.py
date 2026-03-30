@@ -29,8 +29,10 @@ from forecast.factors import ForecastedFactors
 from forecast.forward_curve import load_from_cashflows_report, load_from_workbook
 from forecast.holdings import (
     clean_holdings,
+    enrich_holdings,
     export_tranches,
     import_holdings,
+    load_enriched_holdings,
     load_holdings_from_clo_library,
     load_holdings_from_forecast_workbook,
 )
