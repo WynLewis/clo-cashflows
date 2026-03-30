@@ -207,26 +207,28 @@ def enrich_holdings(
     preprice_deals: PrePriceDeals,
     output_path: str | Path,
     wait_seconds: int = 300,
+    auto_calc: bool = True,
 ) -> pd.DataFrame:
-    """Enrich holdings with Intex/BBG data via xlwings (fully automated).
+    """Enrich holdings with Intex/BBG data.
 
-    Two-phase approach for reliability with Excel add-ins:
-      Phase 1 (openpyxl): Write the workbook with formulas to disk.
-      Phase 2 (xlwings):  Open the saved file in Excel (add-ins load with the file),
-                          wait for formulas to calculate, read results, close.
+    Three-phase approach:
+      Phase 1a (blpapi): Fetch Bloomberg fields directly via Python.
+      Phase 1b (openpyxl): Write Excel file with Intex formulas + BBG static values.
+      Phase 2 (xlwings): Open in Excel to calculate Intex formulas (optional).
 
-    This is more reliable than creating a new workbook in xlwings because
-    add-in UDFs (IntexLINK, Bloomberg) register better when opening an
-    existing file that already contains their formulas.
+    If auto_calc=False (or Phase 2 fails), the formula file is saved and you
+    can open it manually in Excel. Then use load_enriched_holdings() next run.
 
     Args:
-        holdings_df: Raw holdings DataFrame (from any loading method).
-        preprice_deals: PrePriceDeals lookup for overriding Intex identifiers.
+        holdings_df: Raw holdings DataFrame.
+        preprice_deals: PrePriceDeals lookup.
         output_path: Path to save the enrichment workbook.
-        wait_seconds: Max seconds to wait for formulas to finish calculating.
+        wait_seconds: Max seconds to wait for Intex formulas in Excel.
+        auto_calc: If True, use xlwings Phase 2. If False, skip it.
 
     Returns:
-        The original holdings DataFrame with Intex/BBG columns merged in.
+        Holdings DataFrame with BBG columns merged in.
+        Intex columns only populated if auto_calc succeeds.
     """
     import time
 
@@ -329,10 +331,21 @@ def enrich_holdings(
     owb.close()
     print(f"  {len(bbg_enriched)} CUSIPs written to: {output_path}")
 
+    if not auto_calc:
+        print(f"\n  auto_calc=False — skipping xlwings Phase 2.")
+        print(f"  Open '{output_path.name}' in Excel, let Intex formulas calculate, save it.")
+        print(f"  Then re-run with load_enriched_holdings('{output_path}', holdings_df)")
+        # Return with just BBG data merged.
+        merge_cols = bbg_cols
+        present = [c for c in merge_cols if c in bbg_enriched.columns]
+        drop = [c for c in present if c in holdings_df.columns]
+        result = holdings_df.drop(columns=drop, errors="ignore")
+        enriched_subset = bbg_enriched[["CUSIP"] + present].drop_duplicates(subset=["CUSIP"])
+        result = result.merge(enriched_subset, on="CUSIP", how="left")
+        return result
+
     # ── Phase 2: Open in existing Excel via xlwings to calculate formulas ──
-    # IMPORTANT: We attach to the running Excel instance (where Bloomberg is
-    # already connected) rather than launching a new one.
-    print(f"Phase 2: Opening in Excel to calculate formulas (up to {wait_seconds}s)...")
+    print(f"Phase 2: Opening in Excel to calculate Intex formulas (up to {wait_seconds}s)...")
     import xlwings as xw
     from forecast.excel_addins import disable_addins, enable_addins
 
