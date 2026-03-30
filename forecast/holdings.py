@@ -253,8 +253,19 @@ def enrich_holdings(
     all_cols = base_cols + intex_cols + bbg_cols
     intex_name_col_idx = len(base_cols) + 1  # 1-indexed
 
-    # ── Phase 1: Write workbook with formulas using openpyxl ─────────────
-    print(f"Phase 1: Writing formulas to '{output_path.name}'...")
+    # ── Phase 1a: Fetch Bloomberg data via blpapi (no Excel needed) ───────
+    from forecast.bloomberg import enrich_with_bbg
+
+    print("Phase 1a: Fetching Bloomberg data via blpapi...")
+    try:
+        bbg_enriched = enrich_with_bbg(unique_df)
+    except Exception as e:
+        print(f"  WARNING: Bloomberg API call failed: {e}")
+        print(f"  Continuing without Bloomberg data — clean_holdings will cross-fill from Intex dates.")
+        bbg_enriched = unique_df
+
+    # ── Phase 1b: Write workbook with Intex formulas using openpyxl ──────
+    print(f"Phase 1b: Writing IntexLINK formulas to '{output_path.name}'...")
     import openpyxl
     from openpyxl.utils import get_column_letter
 
@@ -267,12 +278,9 @@ def enrich_holdings(
         ows.cell(row=1, column=col_idx, value=col_name)
 
     intex_name_letter = get_column_letter(intex_name_col_idx)
-
-    # Build function names (with optional add-in prefix for #NAME? fix).
     ix = CONFIG.excel.intex_func("INTEX")
-    bdp = CONFIG.excel.bbg_func("BDP")
 
-    for row_idx, (_, row) in enumerate(unique_df.iterrows(), 2):
+    for row_idx, (_, row) in enumerate(bbg_enriched.iterrows(), 2):
         cusip = str(row.get("CUSIP", ""))
 
         # Base data.
@@ -296,7 +304,7 @@ def enrich_holdings(
             ows.cell(row=row_idx, column=intex_name_col_idx + 1,
                      value=f'={ix}({cusip_ref},"DEAL_DEALNAME")')
 
-        # AAA Margin, dates, deal balance.
+        # AAA Margin, dates, deal balance (Intex formulas).
         ows.cell(row=row_idx, column=intex_name_col_idx + 2,
                  value=f'={ix}({intex_name_ref},"INTXDA_TRBLOCK_FLOAT_MARGIN[AAA]")')
         ows.cell(row=row_idx, column=intex_name_col_idx + 3,
@@ -306,21 +314,16 @@ def enrich_holdings(
         ows.cell(row=row_idx, column=intex_name_col_idx + 5,
                  value=f'={ix}({intex_name_ref},"DEAL_ORIGBAL")')
 
-        # Bloomberg fields.
+        # Bloomberg fields — write static values from blpapi (already fetched).
         bbg_start = intex_name_col_idx + len(intex_cols)
-        bbg_cusip = f'{cusip_ref}&" CUSIP"'
-        ows.cell(row=row_idx, column=bbg_start,
-                 value=f'={bdp}({bbg_cusip},"MTG_DEAL_CALL_DT")')
-        ows.cell(row=row_idx, column=bbg_start + 1,
-                 value=f'={bdp}({bbg_cusip},"REINVEST_END_DATE")')
-        ows.cell(row=row_idx, column=bbg_start + 2,
-                 value=f'={bdp}({bbg_cusip},"RESET_IDX")')
-        ows.cell(row=row_idx, column=bbg_start + 3,
-                 value=f'={bdp}({bbg_cusip},"COLLAT_TYP")')
+        for i, bbg_col in enumerate(bbg_cols):
+            val = row.get(bbg_col)
+            if pd.notna(val):
+                ows.cell(row=row_idx, column=bbg_start + i, value=val)
 
     owb.save(str(output_path))
     owb.close()
-    print(f"  {len(unique_df)} CUSIPs written to: {output_path}")
+    print(f"  {len(bbg_enriched)} CUSIPs written to: {output_path}")
 
     # ── Phase 2: Open in existing Excel via xlwings to calculate formulas ──
     # IMPORTANT: We attach to the running Excel instance (where Bloomberg is
