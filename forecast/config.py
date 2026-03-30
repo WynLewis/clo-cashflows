@@ -86,6 +86,41 @@ class ReinvestmentDefaults:
 
 
 @dataclass
+class ExcelAddIns:
+    """Excel add-in configuration for IntexLINK and Bloomberg.
+
+    If INTEX() formulas show #NAME? errors, set intex_prefix to the
+    XLL add-in filename.  Check yours in Excel via:
+        File → Options → Add-ins → Manage: Excel Add-ins → Go
+    Look for the IntexLINK .xll path.
+
+    Common values:
+        ""                          — no prefix (default, works if add-in loads automatically)
+        "_xll.IntexLINK"            — Excel's internal XLL prefix format
+        "'C:\\path\\IntexLINK.xll'!" — full path prefix
+    """
+
+    # Prefix for INTEX() formulas.  Set to "" for no prefix, or
+    # e.g. "_xll.IntexLINK" if you get #NAME? errors.
+    intex_prefix: str = ""
+
+    # Prefix for BDP() formulas (Bloomberg).  Usually "" works.
+    bloomberg_prefix: str = ""
+
+    def intex_func(self, func_name: str = "INTEX") -> str:
+        """Return the full function call string, with prefix if needed."""
+        if self.intex_prefix:
+            return f"{self.intex_prefix}.{func_name}"
+        return func_name
+
+    def bbg_func(self, func_name: str = "BDP") -> str:
+        """Return the full Bloomberg function call string."""
+        if self.bloomberg_prefix:
+            return f"{self.bloomberg_prefix}.{func_name}"
+        return func_name
+
+
+@dataclass
 class ScenarioDefinition:
     """Definition for a single spread scenario.
 
@@ -147,6 +182,7 @@ class ForecastConfig:
     factor_call: FactorCallAssumptions = field(default_factory=FactorCallAssumptions)
     reinvestment: ReinvestmentDefaults = field(default_factory=ReinvestmentDefaults)
     scenario: ScenarioConfig = field(default_factory=ScenarioConfig)
+    excel: ExcelAddIns = field(default_factory=ExcelAddIns)
 
 
 # Module-level default instance.  Import and modify this, or create your own.

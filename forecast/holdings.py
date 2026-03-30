@@ -210,17 +210,14 @@ def enrich_holdings(
 ) -> pd.DataFrame:
     """Enrich holdings with Intex/BBG data via xlwings (fully automated).
 
-    Uses xlwings to:
-      1. Create an Excel workbook with IntexLINK and Bloomberg BDP formulas.
-      2. Open it in Excel (with add-ins active) and wait for formulas to calculate.
-      3. Read the calculated values back into Python.
-      4. Close Excel.
+    Two-phase approach for reliability with Excel add-ins:
+      Phase 1 (openpyxl): Write the workbook with formulas to disk.
+      Phase 2 (xlwings):  Open the saved file in Excel (add-ins load with the file),
+                          wait for formulas to calculate, read results, close.
 
-    No manual intervention required — as long as Excel, IntexLINK, and Bloomberg
-    Terminal are running on the machine.
-
-    For pre-price CUSIPs, Intex Name and Deal Name are written as static values
-    from the Pre-Price Deals table.
+    This is more reliable than creating a new workbook in xlwings because
+    add-in UDFs (IntexLINK, Bloomberg) register better when opening an
+    existing file that already contains their formulas.
 
     Args:
         holdings_df: Raw holdings DataFrame (from any loading method).
@@ -232,9 +229,9 @@ def enrich_holdings(
         The original holdings DataFrame with Intex/BBG columns merged in.
     """
     import time
-    import xlwings as xw
 
     output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Deduplicate to unique CUSIPs (sum face/par).
     agg_cols = {}
@@ -247,8 +244,6 @@ def enrich_holdings(
             agg_cols[col] = "first"
     unique_df = holdings_df.groupby("CUSIP", as_index=False).agg(agg_cols)
 
-    print(f"Enriching {len(unique_df)} CUSIPs via xlwings...")
-
     # Define column layout.
     base_cols = ["CUSIP", "Description", "Entity Name", "PAM Portfolio",
                  "Original Face", "Current Par", "Price", "OAS", "Floater"]
@@ -256,70 +251,105 @@ def enrich_holdings(
                   "Non-Call End", "Reinvest End", "Orig Deal Balance"]
     bbg_cols = ["BBG_NC_END", "BBG_REINVEST_END", "RESET_IDX", "COLLAT_TYP"]
     all_cols = base_cols + intex_cols + bbg_cols
+    intex_name_col_idx = len(base_cols) + 1  # 1-indexed
 
-    intex_name_col_idx = len(base_cols) + 1  # 1-indexed column for "Intex Name"
+    # ── Phase 1: Write workbook with formulas using openpyxl ─────────────
+    print(f"Phase 1: Writing formulas to '{output_path.name}'...")
+    import openpyxl
+    from openpyxl.utils import get_column_letter
 
-    # Open Excel via xlwings (visible so add-ins load properly).
+    owb = openpyxl.Workbook()
+    ows = owb.active
+    ows.title = "Holdings"
+
+    # Headers.
+    for col_idx, col_name in enumerate(all_cols, 1):
+        ows.cell(row=1, column=col_idx, value=col_name)
+
+    intex_name_letter = get_column_letter(intex_name_col_idx)
+
+    # Build function names (with optional add-in prefix for #NAME? fix).
+    ix = CONFIG.excel.intex_func("INTEX")
+    bdp = CONFIG.excel.bbg_func("BDP")
+
+    for row_idx, (_, row) in enumerate(unique_df.iterrows(), 2):
+        cusip = str(row.get("CUSIP", ""))
+
+        # Base data.
+        for col_idx, col_name in enumerate(base_cols, 1):
+            val = row.get(col_name)
+            if pd.notna(val):
+                ows.cell(row=row_idx, column=col_idx, value=val)
+
+        cusip_ref = f"A{row_idx}"
+        intex_name_ref = f"{intex_name_letter}{row_idx}"
+
+        # Intex Name and Deal Name.
+        if preprice_deals.get_identifier(cusip) != "N/A":
+            ows.cell(row=row_idx, column=intex_name_col_idx,
+                     value=preprice_deals.get_name(cusip))
+            ows.cell(row=row_idx, column=intex_name_col_idx + 1,
+                     value=preprice_deals.get_deal_name(cusip))
+        else:
+            ows.cell(row=row_idx, column=intex_name_col_idx,
+                     value=f'={ix}({cusip_ref},"INTEX_DEAL")')
+            ows.cell(row=row_idx, column=intex_name_col_idx + 1,
+                     value=f'={ix}({cusip_ref},"DEAL_DEALNAME")')
+
+        # AAA Margin, dates, deal balance.
+        ows.cell(row=row_idx, column=intex_name_col_idx + 2,
+                 value=f'={ix}({intex_name_ref},"INTXDA_TRBLOCK_FLOAT_MARGIN[AAA]")')
+        ows.cell(row=row_idx, column=intex_name_col_idx + 3,
+                 value=f'={ix}({intex_name_ref},"DEAL_CALLABLE_AS_OF_DATE")')
+        ows.cell(row=row_idx, column=intex_name_col_idx + 4,
+                 value=f'={ix}({intex_name_ref},"DEAL_REINV_END_DATE")')
+        ows.cell(row=row_idx, column=intex_name_col_idx + 5,
+                 value=f'={ix}({intex_name_ref},"DEAL_ORIGBAL")')
+
+        # Bloomberg fields.
+        bbg_start = intex_name_col_idx + len(intex_cols)
+        bbg_cusip = f'{cusip_ref}&" CUSIP"'
+        ows.cell(row=row_idx, column=bbg_start,
+                 value=f'={bdp}({bbg_cusip},"MTG_DEAL_CALL_DT")')
+        ows.cell(row=row_idx, column=bbg_start + 1,
+                 value=f'={bdp}({bbg_cusip},"REINVEST_END_DATE")')
+        ows.cell(row=row_idx, column=bbg_start + 2,
+                 value=f'={bdp}({bbg_cusip},"RESET_IDX")')
+        ows.cell(row=row_idx, column=bbg_start + 3,
+                 value=f'={bdp}({bbg_cusip},"COLLAT_TYP")')
+
+    owb.save(str(output_path))
+    owb.close()
+    print(f"  {len(unique_df)} CUSIPs written to: {output_path}")
+
+    # ── Phase 2: Open in Excel via xlwings to calculate formulas ─────────
+    print(f"Phase 2: Opening in Excel to calculate formulas (up to {wait_seconds}s)...")
+    import xlwings as xw
+
     app = xw.App(visible=True)
+    wb = None
+    data = None
     try:
-        wb = app.books.add()
-        ws = wb.sheets[0]
-        ws.name = "Holdings"
+        # Give Excel a moment to fully initialize add-ins before opening.
+        time.sleep(5)
 
-        # Write headers.
-        ws.range("A1").value = all_cols
+        wb = app.books.open(str(output_path))
+        ws = wb.sheets["Holdings"]
 
-        # Write base data.
-        for row_idx, (_, row) in enumerate(unique_df.iterrows(), 2):
-            for col_idx, col_name in enumerate(base_cols):
-                val = row.get(col_name)
-                if pd.notna(val):
-                    ws.cells(row_idx, col_idx + 1).value = val
-
-        # Write formulas.
-        for row_idx, (_, row) in enumerate(unique_df.iterrows(), 2):
-            cusip = str(row.get("CUSIP", ""))
-            cusip_ref = f"A{row_idx}"
-            intex_name_ref = f"{_col_letter(intex_name_col_idx)}{row_idx}"
-
-            # Intex Name and Deal Name.
-            if preprice_deals.get_identifier(cusip) != "N/A":
-                ws.cells(row_idx, intex_name_col_idx).value = preprice_deals.get_name(cusip)
-                ws.cells(row_idx, intex_name_col_idx + 1).value = preprice_deals.get_deal_name(cusip)
-            else:
-                ws.cells(row_idx, intex_name_col_idx).formula = f'=INTEX({cusip_ref},"INTEX_DEAL")'
-                ws.cells(row_idx, intex_name_col_idx + 1).formula = f'=INTEX({cusip_ref},"DEAL_DEALNAME")'
-
-            # AAA Margin, dates, deal balance (reference Intex Name cell).
-            ws.cells(row_idx, intex_name_col_idx + 2).formula = f'=INTEX({intex_name_ref},"INTXDA_TRBLOCK_FLOAT_MARGIN[AAA]")'
-            ws.cells(row_idx, intex_name_col_idx + 3).formula = f'=INTEX({intex_name_ref},"DEAL_CALLABLE_AS_OF_DATE")'
-            ws.cells(row_idx, intex_name_col_idx + 4).formula = f'=INTEX({intex_name_ref},"DEAL_REINV_END_DATE")'
-            ws.cells(row_idx, intex_name_col_idx + 5).formula = f'=INTEX({intex_name_ref},"DEAL_ORIGBAL")'
-
-            # Bloomberg fields.
-            bbg_start = intex_name_col_idx + len(intex_cols)
-            bbg_cusip = f'{cusip_ref}&" CUSIP"'
-            ws.cells(row_idx, bbg_start).formula = f'=BDP({bbg_cusip},"MTG_DEAL_CALL_DT")'
-            ws.cells(row_idx, bbg_start + 1).formula = f'=BDP({bbg_cusip},"REINVEST_END_DATE")'
-            ws.cells(row_idx, bbg_start + 2).formula = f'=BDP({bbg_cusip},"RESET_IDX")'
-            ws.cells(row_idx, bbg_start + 3).formula = f'=BDP({bbg_cusip},"COLLAT_TYP")'
-
-        print(f"  Formulas written. Waiting for calculation (up to {wait_seconds}s)...")
-
-        # Wait for Excel to finish calculating.
+        # Force recalculation.
         app.calculation = "automatic"
+        app.calculate()
+
         elapsed = 0
         poll_interval = 5
         while elapsed < wait_seconds:
             time.sleep(poll_interval)
             elapsed += poll_interval
-            # Check if any cells still show the calculating placeholder.
             try:
                 app.calculate()
-                # Test a formula cell for a non-pre-price CUSIP.
-                test_val = ws.cells(2, intex_name_col_idx + 2).value  # AAA Margin
+                # Spot-check: AAA Margin for the first non-pre-price CUSIP.
+                test_val = ws.cells(2, intex_name_col_idx + 2).value
                 if test_val is not None and not isinstance(test_val, str):
-                    # Spot-check the last row too.
                     last_row = len(unique_df) + 1
                     last_val = ws.cells(last_row, intex_name_col_idx + 2).value
                     if last_val is not None and not isinstance(last_val, str):
@@ -331,17 +361,31 @@ def enrich_holdings(
                 print(f"  Still waiting... ({elapsed}s)")
         else:
             print(f"  WARNING: Timed out after {wait_seconds}s. Some formulas may not have calculated.")
+            print(f"  The file has been saved — you can open it manually to check.")
 
-        # Save the workbook.
-        wb.save(str(output_path))
-        print(f"  Saved to '{output_path.name}'.")
+        # Save with calculated values.
+        wb.save()
+        print(f"  Saved to: {output_path}")
 
-        # Read the calculated values back.
+        # Read the calculated values.
         data = ws.range("A1").expand("table").options(pd.DataFrame, header=1, index=False).value
 
+    except Exception as e:
+        print(f"  ERROR during xlwings calculation: {e}")
+        print(f"  The formula workbook is saved at: {output_path}")
+        print(f"  You can open it manually in Excel, let formulas calculate, save,")
+        print(f"  then use load_enriched_holdings() to read it back.")
+        raise
     finally:
-        wb.close()
-        app.quit()
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+        try:
+            app.quit()
+        except Exception:
+            pass
 
     # Merge enriched columns back onto the full (multi-position) holdings.
     enriched_df = data
