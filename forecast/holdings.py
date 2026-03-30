@@ -3,7 +3,8 @@ Holdings import and export.
 
 Mirrors VBA worksheet module: initial_holdings.cls
 
-Step 1: Import CLO holdings from a Structured Products Data Packet report.
+Step 1: Import CLO holdings from the structured_products library (default),
+        a Structured Products Data Packet report, or the Forecast workbook.
 Step 2: Enrich with Intex/Bloomberg data (in VBA this wrote formulas; here we
         read pre-populated values from the workbook).
 """
@@ -19,6 +20,70 @@ import pandas as pd
 from forecast.config import CONFIG
 from forecast.models import Tranche
 from forecast.preprice import PrePriceDeals
+
+
+def load_holdings_from_clo_library() -> pd.DataFrame:
+    """Load CLO holdings via the structured_products.clo library.
+
+    This is the **default** method — it pulls live portfolio holdings from
+    the structured_products library (same source as the holdings_pricing notebook).
+
+    Requires the structured_products package to be on PYTHONPATH.
+    If not available, falls back gracefully with a clear error.
+
+    Returns:
+        DataFrame with one row per position.
+    """
+    try:
+        from structured_products import clo
+    except ImportError:
+        raise ImportError(
+            "The 'structured_products' package is not available. "
+            "Either add it to your PYTHONPATH (e.g. sys.path.append('C:/ActData/Python/files/OOI/structured-products-main/')) "
+            "or use import_holdings() with a Data Packet file, "
+            "or load_holdings_from_forecast_workbook() instead."
+        )
+
+    print("Loading CLO holdings from structured_products.clo library...")
+    holdings = clo.holdings(type='portfolio')
+
+    as_of_date = pd.to_datetime(holdings.iloc[0]["As_at_Date"]).date()
+    print(f"  Data as of: {as_of_date.strftime('%B %d, %Y')}")
+    print(f"  {len(holdings)} positions loaded")
+    print(f"  {holdings['Primary Security ID'].nunique()} unique securities")
+    print(f"  ${holdings['GAAP BV'].sum():,.2f} total GAAP book value")
+
+    # Standardize column names to match the Forecast workbook convention.
+    col_map = {
+        "Primary Security ID": "CUSIP",
+        "Security Description": "Description",
+        "Client Level 2": "Client Level 2",
+        "Client Level 3": "Client Level 3",
+        "Entity Name": "Entity Name",
+        "PAM Portfolio": "PAM Portfolio",
+        "Original Face": "Original Face",
+        "Par": "Current Par",
+        "GAAP BV": "Book Value",
+        "Market Value": "Market Value",
+        "Price": "Price",
+        "OAS": "OAS",
+        "S&P Rating": "S&P",
+        "Moodys Rating": "Moody's",
+        "Fitch Rating": "Fitch",
+        "Internal Rating": "Internal",
+        "Floater": "Floater",
+        "Portfolio View Level 4": "Portfolio View Level 4",
+    }
+    # Only rename columns that exist in the DataFrame.
+    rename_map = {k: v for k, v in col_map.items() if k in holdings.columns}
+    holdings = holdings.rename(columns=rename_map)
+
+    # Filter for CLO positions only.
+    if "Portfolio View Level 4" in holdings.columns:
+        holdings = holdings[holdings["Portfolio View Level 4"] == "CLO"].copy()
+        print(f"  {len(holdings)} CLO positions after filtering")
+
+    return holdings.reset_index(drop=True)
 
 
 def _to_date_or_none(val) -> Optional[date]:

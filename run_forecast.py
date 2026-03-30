@@ -31,6 +31,7 @@ from forecast.holdings import (
     clean_holdings,
     export_tranches,
     import_holdings,
+    load_holdings_from_clo_library,
     load_holdings_from_forecast_workbook,
 )
 from forecast.preprice import PrePriceDeals
@@ -76,7 +77,14 @@ def run_full_workflow(
     if data_packet:
         holdings_df = import_holdings(data_packet)
     else:
-        holdings_df = load_holdings_from_forecast_workbook(forecast_wb)
+        # Default: load from structured_products.clo library.
+        # Falls back to the Forecast workbook if the library is unavailable.
+        try:
+            holdings_df = load_holdings_from_clo_library()
+        except ImportError as e:
+            print(f"  {e}")
+            print("  Falling back to Forecast workbook...")
+            holdings_df = load_holdings_from_forecast_workbook(forecast_wb)
 
     # ── Step 2: Enrich & Clean Holdings Data ─────────────────────────────
     print("\n" + "=" * 70)
