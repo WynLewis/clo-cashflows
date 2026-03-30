@@ -324,25 +324,23 @@ def enrich_holdings(
 
     # ── Phase 2: Open in existing Excel via xlwings to calculate formulas ──
     # IMPORTANT: We attach to the running Excel instance (where Bloomberg is
-    # already connected) rather than launching a new one.  This fixes the
-    # Bloomberg #N/A Connection error.
+    # already connected) rather than launching a new one.
     print(f"Phase 2: Opening in Excel to calculate formulas (up to {wait_seconds}s)...")
     import xlwings as xw
+    from forecast.excel_addins import disable_addins, enable_addins
 
     # Try to attach to an existing Excel instance first.
-    # If none is running, start a new one (Bloomberg BDP won't work but Intex may).
     app = None
     launched_new = False
     try:
         apps = xw.apps
         if len(apps) > 0:
-            app = apps[0]  # Attach to the first running Excel instance.
-            print("  Attached to existing Excel instance (Bloomberg connection preserved).")
+            app = apps[0]
+            print("  Attached to existing Excel instance.")
         else:
             app = xw.App(visible=True)
             launched_new = True
             print("  No existing Excel found — launched new instance.")
-            print("  NOTE: Bloomberg BDP formulas may not work without an active Terminal.")
     except Exception:
         app = xw.App(visible=True)
         launched_new = True
@@ -350,19 +348,31 @@ def enrich_holdings(
     wb = None
     data = None
     try:
+        # Step 1: Disable add-ins so we can open the file cleanly.
+        disable_addins(app)
+
+        # Step 2: Open the workbook (formulas will show #NAME? — that's expected).
         wb = app.books.open(str(output_path))
         ws = wb.sheets["Holdings"]
+        print("  Workbook opened.")
 
-        # Give IntexLINK and Bloomberg add-ins time to initialize and start
-        # processing the formulas.  IntexLINK in particular needs time to
-        # connect to its server and begin resolving formulas.
-        initial_wait = 30
-        print(f"  Waiting {initial_wait}s for add-ins to initialize and begin calculating...")
-        time.sleep(initial_wait)
+        # Step 3: Re-enable add-ins — they will discover and resolve the formulas.
+        enable_addins(app)
 
-        # Force recalculation.
+        # Step 4: Force full recalculation now that add-ins are active.
+        print("  Triggering full recalculation...")
         app.calculation = "automatic"
         app.calculate()
+        # Also force recalc via Ctrl+Alt+F9 equivalent.
+        try:
+            app.api.CalculateFullRebuild()
+        except Exception:
+            pass
+
+        # Give add-ins time to process all formulas.
+        initial_wait = 30
+        print(f"  Waiting {initial_wait}s for formulas to begin resolving...")
+        time.sleep(initial_wait)
 
         # Poll until formulas resolve.  Check the AAA Margin column (numeric)
         # since string columns like Intex Name might legitimately contain text.

@@ -89,16 +89,26 @@ class ReinvestmentDefaults:
 class ExcelAddIns:
     """Excel add-in configuration for IntexLINK and Bloomberg.
 
-    If INTEX() formulas show #NAME? errors, set intex_prefix to the
-    XLL add-in filename.  Check yours in Excel via:
-        File → Options → Add-ins → Manage: Excel Add-ins → Go
-    Look for the IntexLINK .xll path.
+    The add-in names are used to toggle COM add-ins on/off via xlwings.
+    Check yours in Excel via:
+        File → Options → Add-ins → Manage: COM Add-ins → Go
 
-    Common values:
-        ""                          — no prefix (default, works if add-in loads automatically)
-        "_xll.IntexLINK"            — Excel's internal XLL prefix format
-        "'C:\\path\\IntexLINK.xll'!" — full path prefix
+    If INTEX() formulas show #NAME? errors, set intex_prefix to the
+    XLL add-in filename.  Check via:
+        File → Options → Add-ins → Manage: Excel Add-ins → Go
     """
+
+    # COM Add-in ProgIDs (used for toggling on/off).
+    # These are the names that appear in Excel's COM Add-ins dialog.
+    # Common values — update if yours differ:
+    intex_com_addin: str = "IntexLINK.Connect"
+    bloomberg_com_addin: str = "Bloomberg Excel COM Add-In"
+
+    # XLL add-in paths (used for toggling on/off).
+    # Set to "" to skip XLL toggling.  Check yours in Excel via:
+    #   File → Options → Add-ins → Manage: Excel Add-ins → Go
+    intex_xll_path: str = ""  # e.g. "C:\\IntexLINK\\IntexLINK.xll"
+    bloomberg_xll_path: str = ""  # e.g. "C:\\blp\\API\\Office Tools\\BloombergUI.xll"
 
     # Prefix for INTEX() formulas.  Set to "" for no prefix, or
     # e.g. "_xll.IntexLINK" if you get #NAME? errors.
