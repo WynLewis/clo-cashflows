@@ -253,14 +253,18 @@ def enrich_holdings(
     all_cols = base_cols + intex_cols + bbg_cols
     intex_name_col_idx = len(base_cols) + 1  # 1-indexed
 
-    # ── Phase 1a: Fetch Bloomberg data via blpapi (no Excel needed) ───────
+    # ── Phase 1a: Fetch Bloomberg data via xbbg (no Excel needed) ──────────
     from forecast.bloomberg import enrich_with_bbg
 
-    print("Phase 1a: Fetching Bloomberg data via blpapi...")
+    print("Phase 1a: Fetching Bloomberg data via xbbg...")
     try:
         bbg_enriched = enrich_with_bbg(unique_df)
-    except Exception as e:
-        print(f"  WARNING: Bloomberg API call failed: {e}")
+    except BaseException as e:
+        print(f"  WARNING: Bloomberg fetch failed: {type(e).__name__}: {e}")
+        print(f"  This usually means:")
+        print(f"    - Bloomberg Terminal is not running or not logged in")
+        print(f"    - blpapi C++ SDK is not installed (pip install blpapi is not enough)")
+        print(f"    - xbbg cannot connect to the Bloomberg session")
         print(f"  Continuing without Bloomberg data — clean_holdings will cross-fill from Intex dates.")
         bbg_enriched = unique_df
 
