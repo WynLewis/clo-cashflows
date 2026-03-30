@@ -1,12 +1,14 @@
 """
-Bloomberg data retrieval via xbbg.
+Bloomberg data retrieval via the blpapi Python SDK.
 
 Replaces the Excel BDP() formulas with direct Python API calls.
-Requires Bloomberg Terminal running and the xbbg package installed:
-    pip install xbbg
+Requires Bloomberg Terminal running and the blpapi package installed
+with the C++ SDK.
 """
 
 from __future__ import annotations
+
+from datetime import date
 
 import pandas as pd
 
@@ -21,59 +23,133 @@ BBG_FIELDS = {
 }
 
 
-def fetch_bbg_data(cusips: list[str]) -> pd.DataFrame:
-    """Fetch Bloomberg reference data for a list of CUSIPs using xbbg.
+def fetch_bbg_data(cusips: list[str], timeout_ms: int = 60000) -> pd.DataFrame:
+    """Fetch Bloomberg reference data for a list of CUSIPs.
 
-    Makes a single bulk BDP call for all CUSIPs and fields.
+    Uses blpapi directly (not xbbg) for reliability.
 
     Args:
         cusips: List of CUSIP strings.
+        timeout_ms: Timeout in milliseconds for the Bloomberg request.
 
     Returns:
         DataFrame with columns: CUSIP, BBG_NC_END, BBG_REINVEST_END, RESET_IDX, COLLAT_TYP
     """
-    from xbbg import blp
+    import blpapi
 
-    # Build security identifiers (Bloomberg expects "/cusip/XXXXXXXXX" or "XXXXXXXXX CUSIP").
     tickers = [f"/cusip/{cusip}" for cusip in cusips]
     fields = list(BBG_FIELDS.keys())
 
     print(f"  Requesting {len(fields)} fields for {len(cusips)} CUSIPs from Bloomberg...")
 
-    # xbbg.blp.bdp returns a DataFrame with tickers as index and fields as columns.
-    raw = blp.bdp(tickers=tickers, flds=fields)
+    # Connect.
+    session_options = blpapi.SessionOptions()
+    session_options.setServerHost("localhost")
+    session_options.setServerPort(8194)
 
-    print(f"  Received {len(raw)} rows from Bloomberg.")
+    session = blpapi.Session(session_options)
+    if not session.start():
+        raise ConnectionError("Could not start Bloomberg session.")
 
-    # Map the index back to CUSIPs and rename columns.
-    # xbbg index is the ticker string; extract the CUSIP from it.
-    rows = []
-    for ticker, data in raw.iterrows():
-        # Extract CUSIP from "/cusip/XXXXXXXXX" or "XXXXXXXXX CUSIP" format.
-        if "/cusip/" in str(ticker).lower():
-            cusip = str(ticker).split("/")[-1].strip()
-        else:
-            cusip = str(ticker).split()[0].strip()
+    if not session.openService("//blp/refdata"):
+        session.stop()
+        raise ConnectionError("Could not open //blp/refdata service.")
 
-        row = {"CUSIP": cusip}
-        for bbg_field, our_col in BBG_FIELDS.items():
-            # xbbg lowercases field names in the DataFrame columns.
-            val = data.get(bbg_field) or data.get(bbg_field.lower())
-            if pd.notna(val):
-                row[our_col] = val
-        rows.append(row)
+    try:
+        service = session.getService("//blp/refdata")
+        request = service.createRequest("ReferenceDataRequest")
 
+        for t in tickers:
+            request.append("securities", t)
+        for f in fields:
+            request.append("fields", f)
+
+        session.sendRequest(request)
+
+        # Collect responses.
+        results: dict[str, dict[str, object]] = {c: {} for c in cusips}
+        done = False
+
+        while not done:
+            event = session.nextEvent(timeout_ms)
+            event_type = event.eventType()
+
+            if event_type in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
+                for msg in event:
+                    if not msg.hasElement("securityData"):
+                        continue
+                    security_data = msg.getElement("securityData")
+                    for i in range(security_data.numValues()):
+                        sec = security_data.getValueAsElement(i)
+                        sec_name = sec.getElementAsString("security")
+
+                        # Extract CUSIP from "/cusip/XXXXXXXXX".
+                        cusip = sec_name.rsplit("/", 1)[-1].strip()
+
+                        if sec.hasElement("securityError"):
+                            continue
+
+                        if not sec.hasElement("fieldData"):
+                            continue
+
+                        fd = sec.getElement("fieldData")
+                        for bbg_field, our_col in BBG_FIELDS.items():
+                            if fd.hasElement(bbg_field):
+                                el = fd.getElement(bbg_field)
+                                if not el.isNull():
+                                    results[cusip][our_col] = _to_python(el)
+
+            if event_type == blpapi.Event.RESPONSE:
+                done = True
+
+    finally:
+        session.stop()
+
+    # Build DataFrame.
+    rows = [{"CUSIP": c, **results.get(c, {})} for c in cusips]
     df = pd.DataFrame(rows)
 
-    # Summary.
     for col in BBG_FIELDS.values():
         if col in df.columns:
-            populated = df[col].notna().sum()
-            print(f"    {col}: {populated}/{len(cusips)} populated")
+            n = df[col].notna().sum()
+            print(f"    {col}: {n}/{len(cusips)} populated")
         else:
-            print(f"    {col}: column missing from response")
+            print(f"    {col}: no data returned")
 
     return df
+
+
+def _to_python(element) -> object:
+    """Convert a blpapi Element to a Python value."""
+    import blpapi
+
+    dtype = element.datatype()
+
+    # Date
+    if dtype == blpapi.DataType.DATE:
+        v = element.getValueAsDatetime()
+        try:
+            return date(v.year, v.month, v.day)
+        except Exception:
+            return None
+
+    # String
+    if dtype in (blpapi.DataType.STRING, blpapi.DataType.BYTEARRAY):
+        return element.getValueAsString()
+
+    # Numeric
+    if dtype in (blpapi.DataType.BOOL,):
+        return element.getValueAsBool()
+    if dtype in (blpapi.DataType.INT32, blpapi.DataType.INT64):
+        return element.getValueAsInteger()
+    if dtype in (blpapi.DataType.FLOAT32, blpapi.DataType.FLOAT64):
+        return element.getValueAsFloat()
+
+    # Fallback
+    try:
+        return element.getValueAsString()
+    except Exception:
+        return None
 
 
 def enrich_with_bbg(holdings_df: pd.DataFrame) -> pd.DataFrame:
